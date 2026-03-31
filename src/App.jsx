@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 import _ from "lodash";
 
@@ -134,6 +134,60 @@ function ColumnMapper({ label, headers, value, onChange }) {
   );
 }
 
+function CostCenterPicker({ costCenters, value, onChange, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const ref = useRef();
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!search) return costCenters;
+    const q = search.toLowerCase();
+    return costCenters.filter((cc) => cc.ccId.toLowerCase().includes(q) || cc.ccDesc.toLowerCase().includes(q));
+  }, [costCenters, search]);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <input
+        value={value || ""}
+        onChange={(e) => { onChange(e.target.value, ""); setSearch(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        placeholder={placeholder}
+        style={{ ...baseInput, width: "100%" }}
+      />
+      {open && filtered.length > 0 && (
+        <div style={{
+          position: "absolute", top: "100%", left: 0, right: 0, zIndex: 100,
+          background: COLORS.surfaceAlt, border: `1px solid ${COLORS.border}`, borderRadius: 6,
+          maxHeight: 180, overflowY: "auto", marginTop: 2, boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+        }}>
+          {filtered.slice(0, 50).map((cc) => (
+            <div
+              key={cc.ccId}
+              onClick={() => { onChange(cc.ccId, cc.ccDesc); setSearch(""); setOpen(false); }}
+              style={{
+                padding: "6px 10px", cursor: "pointer", fontSize: 12,
+                borderBottom: `1px solid ${COLORS.border}`,
+                color: COLORS.text,
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = COLORS.surface}
+              onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+            >
+              <span style={{ fontWeight: 600, marginRight: 8, fontFamily: "'IBM Plex Mono', monospace" }}>{cc.ccId}</span>
+              <span style={{ color: COLORS.textMuted }}>{cc.ccDesc}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DataTable({ columns, rows, maxRows = 200, emptyMsg = "No data" }) {
   if (!rows.length) return <div style={{ padding: 20, color: COLORS.textMuted, textAlign: "center", fontSize: 13 }}>{emptyMsg}</div>;
   const display = rows.slice(0, maxRows);
@@ -216,11 +270,11 @@ export default function AllocationTool() {
 
   // Allocation config
   const [allocType, setAllocType] = useState("dollar"); // "dollar" | "percent"
-  const [invoiceTotal, setInvoiceTotal] = useState("");
-  const [servicePeriodMonths, setServicePeriodMonths] = useState("12");
+  const [invoices, setInvoices] = useState([{ description: "", amount: "", months: "12" }]);
   const [licenseDelimiter, setLicenseDelimiter] = useState(";");
   const [rates, setRates] = useState({});
   const [softwareName, setSoftwareName] = useState("");
+  const [rateCardFile, setRateCardFile] = useState(null);
 
   // Processing results
   const [processed, setProcessed] = useState(null);
@@ -300,6 +354,56 @@ export default function AllocationTool() {
     return [...set].sort();
   }, [swData, swHeaderRow, swLicenseCol, licenseDelimiter, allocType]);
 
+  // Unique cost centers from HR (for dropdown in flagged user assignment)
+  const hrCostCenters = useMemo(() => {
+    const map = new Map();
+    Object.values(hrLookup).forEach((v) => {
+      if (v.ccId && !map.has(v.ccId)) map.set(v.ccId, { ccId: v.ccId, ccDesc: v.ccDesc });
+    });
+    return [...map.values()].sort((a, b) => a.ccId.localeCompare(b.ccId));
+  }, [hrLookup]);
+
+  // Combined monthly amortized from all invoices
+  const totalMonthlyAmort = useMemo(() => {
+    return invoices.reduce((sum, inv) => {
+      const amt = parseFloat(inv.amount) || 0;
+      const mo = parseFloat(inv.months) || 12;
+      return sum + (amt / mo);
+    }, 0);
+  }, [invoices]);
+
+  const totalInvoiceAmount = useMemo(() => {
+    return invoices.reduce((sum, inv) => sum + (parseFloat(inv.amount) || 0), 0);
+  }, [invoices]);
+
+  // Rate card upload handler
+  const handleRateCardUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const wb = XLSX.read(ev.target.result, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+      if (rows.length < 2) return;
+      const newRates = {};
+      // Try to detect header row - skip rows where col 2 isn't numeric
+      let startRow = 0;
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i].length >= 2 && !isNaN(parseFloat(rows[i][1]))) { startRow = i; break; }
+        startRow = i + 1;
+      }
+      for (let i = startRow; i < rows.length; i++) {
+        const name = (rows[i][0] || "").toString().trim();
+        const rate = parseFloat(rows[i][1]);
+        if (name && !isNaN(rate)) newRates[name] = rate;
+      }
+      setRates((prev) => ({ ...prev, ...newRates }));
+      setRateCardFile(file.name);
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
   // ── Processing ────────────────────────────────────────────────
   const runAllocation = () => {
     const users = [];
@@ -373,7 +477,7 @@ export default function AllocationTool() {
     } else {
       const total = assigned.length;
       const groups = _.groupBy(assigned, "ccId");
-      const monthlyAmort = parseFloat(invoiceTotal) / parseFloat(servicePeriodMonths || 12);
+      const monthlyAmort = totalMonthlyAmort;
       const summary = Object.entries(groups)
         .map(([ccId, members]) => ({
           ccId,
@@ -383,9 +487,9 @@ export default function AllocationTool() {
           monthlyCharge: (members.length / total) * monthlyAmort,
         }))
         .sort((a, b) => a.ccId.localeCompare(b.ccId));
-      return { type: "percent", users: assigned, summary, totalUsers: total, monthlyAmort, stillFlagged, invoiceTotal: parseFloat(invoiceTotal), servicePeriodMonths: parseFloat(servicePeriodMonths) };
+      return { type: "percent", users: assigned, summary, totalUsers: total, monthlyAmort, stillFlagged, invoices, totalInvoiceAmount };
     }
-  }, [processed, manualOverrides, allocType, invoiceTotal, servicePeriodMonths, rates]);
+  }, [processed, manualOverrides, allocType, totalMonthlyAmort, totalInvoiceAmount, invoices, rates]);
 
   // ── Excel Export ──────────────────────────────────────────────
   const exportExcel = () => {
@@ -430,9 +534,15 @@ export default function AllocationTool() {
     } else {
       // Tab 1: Monthly Allocation
       const monthlyAmort = finalAllocation.monthlyAmort;
+      const invoiceRows = finalAllocation.invoices.map((inv) => {
+        const desc = inv.description ? `${inv.description}: ` : "";
+        return [`${desc}$${fmt(parseFloat(inv.amount) || 0)} over ${inv.months || 12} months → $${fmt((parseFloat(inv.amount) || 0) / (parseFloat(inv.months) || 12))}/mo`];
+      });
       const sumData = [
         [`${softwareName || "Software"} Fixed % Allocation`],
-        [`Invoice Total: $${fmt(finalAllocation.invoiceTotal)}`, `Service Period: ${finalAllocation.servicePeriodMonths} months`, `Monthly Amortized: $${fmt(monthlyAmort)}`],
+        [`Total Invoice Amount: $${fmt(finalAllocation.totalInvoiceAmount)}`],
+        ...invoiceRows,
+        [`Combined Monthly Amortized: $${fmt(monthlyAmort)}`],
         [],
         ["CC ID", "CC Description", "User Count", "% Allocation", "Monthly Charge"],
         ...finalAllocation.summary.map((r) => [r.ccId, r.ccDesc, r.userCount, r.pct, r.monthlyCharge]),
@@ -600,10 +710,18 @@ export default function AllocationTool() {
               <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}`, marginBottom: 20 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                   <div style={{ fontSize: 13, fontWeight: 600 }}>License Rate Sheet</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <label style={{ ...btn("ghost"), padding: "6px 14px", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      ↑ Upload Rate Card
+                      <input type="file" accept=".xlsx,.xls,.csv" onChange={handleRateCardUpload} style={{ display: "none" }} />
+                    </label>
+                    {rateCardFile && <span style={{ fontSize: 11, color: COLORS.success }}>✓ {rateCardFile}</span>}
                     <span style={{ fontSize: 11, color: COLORS.textMuted }}>Delimiter:</span>
                     <input value={licenseDelimiter} onChange={(e) => setLicenseDelimiter(e.target.value)} style={{ ...baseInput, width: 40, textAlign: "center" }} />
                   </div>
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 10 }}>
+                  Upload a rate card (.xlsx with License Type in column A, Monthly Rate in column B) or set rates manually below.
                 </div>
                 {uniqueLicenses.length === 0 && (
                   <div style={{ fontSize: 12, color: COLORS.warn, background: COLORS.warnBg, padding: 10, borderRadius: 6 }}>
@@ -631,25 +749,71 @@ export default function AllocationTool() {
 
             {allocType === "percent" && (
               <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}`, marginBottom: 20 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Invoice Details</div>
-                <div style={{ display: "flex", gap: 20 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 12, color: COLORS.textMuted, marginBottom: 4 }}>Total Invoice Amount ($)</div>
-                    <input type="number" value={invoiceTotal} onChange={(e) => setInvoiceTotal(e.target.value)} style={{ ...baseInput, width: "100%" }} placeholder="e.g. 69600" />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 12, color: COLORS.textMuted, marginBottom: 4 }}>Service Period (months)</div>
-                    <input type="number" value={servicePeriodMonths} onChange={(e) => setServicePeriodMonths(e.target.value)} style={{ ...baseInput, width: "100%" }} />
-                  </div>
-                  {invoiceTotal && servicePeriodMonths && (
-                    <div style={{ flex: 1, background: COLORS.surfaceAlt, borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", justifyContent: "center" }}>
-                      <div style={{ fontSize: 11, color: COLORS.textMuted }}>Monthly Amortized</div>
-                      <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.accent, fontFamily: "'IBM Plex Mono', monospace" }}>
-                        ${fmt(parseFloat(invoiceTotal) / parseFloat(servicePeriodMonths))}
-                      </div>
-                    </div>
-                  )}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>Invoices</div>
+                  <button
+                    onClick={() => setInvoices((inv) => [...inv, { description: "", amount: "", months: "12" }])}
+                    style={{ ...btn("ghost"), padding: "4px 12px", fontSize: 11 }}
+                  >
+                    + Add Invoice
+                  </button>
                 </div>
+                <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 12 }}>
+                  Add one or more invoices. The monthly amortized cost from all invoices will be combined for the allocation.
+                </div>
+                {invoices.map((inv, idx) => (
+                  <div key={idx} style={{ display: "flex", gap: 12, marginBottom: 10, alignItems: "flex-end", background: COLORS.surfaceAlt, padding: 12, borderRadius: 8 }}>
+                    <div style={{ flex: 1.5 }}>
+                      <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 3 }}>Description (opt.)</div>
+                      <input
+                        value={inv.description}
+                        onChange={(e) => setInvoices((arr) => arr.map((v, i) => i === idx ? { ...v, description: e.target.value } : v))}
+                        style={{ ...baseInput, width: "100%" }}
+                        placeholder="e.g. Dropbox Annual"
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 3 }}>Amount ($)</div>
+                      <input
+                        type="number"
+                        value={inv.amount}
+                        onChange={(e) => setInvoices((arr) => arr.map((v, i) => i === idx ? { ...v, amount: e.target.value } : v))}
+                        style={{ ...baseInput, width: "100%" }}
+                        placeholder="e.g. 69600"
+                      />
+                    </div>
+                    <div style={{ flex: 0.7 }}>
+                      <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 3 }}>Months</div>
+                      <input
+                        type="number"
+                        value={inv.months}
+                        onChange={(e) => setInvoices((arr) => arr.map((v, i) => i === idx ? { ...v, months: e.target.value } : v))}
+                        style={{ ...baseInput, width: "100%" }}
+                      />
+                    </div>
+                    <div style={{ fontSize: 11, color: COLORS.accent, fontFamily: "'IBM Plex Mono', monospace", width: 90, textAlign: "right", paddingBottom: 2 }}>
+                      {inv.amount && inv.months ? `$${fmt((parseFloat(inv.amount) || 0) / (parseFloat(inv.months) || 12))}/mo` : ""}
+                    </div>
+                    {invoices.length > 1 && (
+                      <button
+                        onClick={() => setInvoices((arr) => arr.filter((_, i) => i !== idx))}
+                        style={{ background: "none", border: "none", color: COLORS.danger, cursor: "pointer", fontSize: 14, padding: "4px 8px", lineHeight: 1 }}
+                        title="Remove invoice"
+                      >×</button>
+                    )}
+                  </div>
+                ))}
+                {totalMonthlyAmort > 0 && (
+                  <div style={{ marginTop: 12, background: COLORS.surfaceAlt, borderRadius: 8, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: COLORS.textMuted }}>Combined Monthly Amortized</div>
+                      {invoices.length > 1 && <div style={{ fontSize: 10, color: COLORS.textMuted }}>from {invoices.filter((i) => parseFloat(i.amount) > 0).length} invoice(s), total ${fmt(totalInvoiceAmount)}</div>}
+                    </div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.accent, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      ${fmt(totalMonthlyAmort)}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -693,23 +857,25 @@ export default function AllocationTool() {
                 <p style={{ fontSize: 12, color: COLORS.textMuted, margin: "4px 0 12px" }}>
                   These emails weren't found in the HR file. Assign cost centers below or leave blank to exclude from allocation.
                 </p>
-                <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                <div style={{ maxHeight: 400, overflowY: "auto" }}>
                   {processed.flaggedUsers.map((u) => (
                     <div key={u.email} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, background: COLORS.surface, padding: "8px 12px", borderRadius: 6 }}>
                       <span style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</span>
                       {u.itCcId && <span style={{ fontSize: 10, color: COLORS.textMuted, flexShrink: 0 }}>IT: {u.itCcId}</span>}
-                      <input
-                        placeholder="CC ID"
-                        value={manualOverrides[u.email]?.ccId || ""}
-                        onChange={(e) => setManualOverrides((o) => ({ ...o, [u.email]: { ...o[u.email], ccId: e.target.value.trim() } }))}
-                        style={{ ...baseInput, width: 80 }}
-                      />
-                      <input
-                        placeholder="CC Description"
-                        value={manualOverrides[u.email]?.ccDesc || ""}
-                        onChange={(e) => setManualOverrides((o) => ({ ...o, [u.email]: { ...o[u.email], ccDesc: e.target.value } }))}
-                        style={{ ...baseInput, width: 200 }}
-                      />
+                      <div style={{ width: 280, flexShrink: 0 }}>
+                        <CostCenterPicker
+                          costCenters={hrCostCenters}
+                          value={manualOverrides[u.email]?.ccId || ""}
+                          placeholder="Search or type CC ID..."
+                          onChange={(ccId, ccDesc) => setManualOverrides((o) => ({
+                            ...o,
+                            [u.email]: { ccId, ccDesc: ccDesc || o[u.email]?.ccDesc || "" },
+                          }))}
+                        />
+                      </div>
+                      <span style={{ fontSize: 11, color: COLORS.textMuted, width: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}>
+                        {manualOverrides[u.email]?.ccDesc || ""}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -733,7 +899,7 @@ export default function AllocationTool() {
                 <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>
                   {finalAllocation.type === "dollar"
                     ? `${finalAllocation.users.length} users across ${finalAllocation.summary.length} cost centers · $${fmt(finalAllocation.grandTotal)}/mo`
-                    : `${finalAllocation.totalUsers} active users across ${finalAllocation.summary.length} cost centers · $${fmt(finalAllocation.monthlyAmort)}/mo amortized`}
+                    : `${finalAllocation.totalUsers} active users across ${finalAllocation.summary.length} cost centers · $${fmt(finalAllocation.monthlyAmort)}/mo amortized${finalAllocation.invoices.length > 1 ? ` (${finalAllocation.invoices.length} invoices)` : ""}`}
                 </div>
                 {finalAllocation.stillFlagged.length > 0 && (
                   <div style={{ fontSize: 11, color: COLORS.warn, marginTop: 4 }}>
@@ -773,7 +939,7 @@ export default function AllocationTool() {
 
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
               <button onClick={() => setStep(2)} style={btn("ghost")}>← Back to Review</button>
-              <button onClick={() => { setStep(0); setProcessed(null); setHrFile(null); setSwFile(null); setHrSheet(""); setSwSheet(""); setSoftwareName(""); setRates({}); setInvoiceTotal(""); setManualOverrides({}); }} style={btn("ghost")}>
+              <button onClick={() => { setStep(0); setProcessed(null); setHrFile(null); setSwFile(null); setHrSheet(""); setSwSheet(""); setSoftwareName(""); setRates({}); setInvoices([{ description: "", amount: "", months: "12" }]); setManualOverrides({}); setRateCardFile(null); }} style={btn("ghost")}>
                 Start New Allocation
               </button>
             </div>
