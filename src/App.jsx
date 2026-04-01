@@ -946,6 +946,81 @@ export default function AllocationTool() {
           </div>
         )}
       </div>
+
+      {/* ───── Instructions ───── */}
+      <div style={{ maxWidth: 960, margin: "48px auto 0", borderTop: `1px solid ${COLORS.border}`, paddingTop: 32, paddingBottom: 48 }}>
+        <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, color: COLORS.text }}>Instructions</h2>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 28 }}>
+          <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}` }}>
+            <h3 style={{ fontSize: 13, fontWeight: 700, color: COLORS.accent, marginBottom: 8 }}>Fixed Dollar Allocation</h3>
+            <p style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.6, marginBottom: 8 }}>
+              Charge each cost center based on per-user license costs. Used when users have different license tiers with known monthly rates (e.g., Adobe Creative Cloud vs. Adobe Stock).
+            </p>
+            <ul style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.8, paddingLeft: 16, margin: 0 }}>
+              <li>Upload or manually define a rate card with monthly cost per license type</li>
+              <li>Supports multiple licenses per user (delimiter-configurable)</li>
+              <li>Outputs a cost-per-cost-center summary for accounting entry</li>
+            </ul>
+          </div>
+          <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}` }}>
+            <h3 style={{ fontSize: 13, fontWeight: 700, color: COLORS.accent, marginBottom: 8 }}>Fixed % Allocation</h3>
+            <p style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.6, marginBottom: 8 }}>
+              Allocate a percentage of monthly amortized invoice cost to each cost center based on active user count. Used when all users share the same subscription (e.g., Dropbox).
+            </p>
+            <ul style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.8, paddingLeft: 16, margin: 0 }}>
+              <li>Supports multiple invoices with different amounts and service periods</li>
+              <li>Calculates combined monthly amortized cost automatically</li>
+              <li>Outputs percentage allocation per cost center for quarterly Workday updates</li>
+            </ul>
+          </div>
+        </div>
+
+        <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}`, marginBottom: 24 }}>
+          <h3 style={{ fontSize: 13, fontWeight: 700, color: COLORS.accent, marginBottom: 12 }}>How It Works</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+            {[
+              { step: "1", title: "Upload", desc: "Upload the HR Employee List (.xlsx with emails and cost centers) and the Software User List (.xlsx from IT)" },
+              { step: "2", title: "Configure", desc: "Select the allocation method, map columns, and set rates or invoice details" },
+              { step: "3", title: "Review", desc: "See match statistics and assign unmatched users to cost centers via searchable dropdown" },
+              { step: "4", title: "Results", desc: "View the allocation summary and download an Excel workbook for accounting" },
+            ].map((s) => (
+              <div key={s.step} style={{ textAlign: "center" }}>
+                <div style={{ width: 28, height: 28, borderRadius: "50%", background: COLORS.accent, color: COLORS.white, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, marginBottom: 8 }}>{s.step}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>{s.title}</div>
+                <div style={{ fontSize: 11, color: COLORS.textMuted, lineHeight: 1.5 }}>{s.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}`, marginBottom: 24 }}>
+          <h3 style={{ fontSize: 13, fontWeight: 700, color: COLORS.accent, marginBottom: 8 }}>Unmatched Users</h3>
+          <p style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.6, margin: 0 }}>
+            Users not found in the HR file are flagged for manual assignment. A searchable cost center picker lets you quickly find and select from existing HR cost centers instead of typing IDs manually. IT-provided cost centers are shown as reference but not used automatically (they tend to be stale).
+          </p>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+          <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}` }}>
+            <h3 style={{ fontSize: 13, fontWeight: 700, color: COLORS.accent, marginBottom: 8 }}>Fixed Dollar Export</h3>
+            <ul style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.8, paddingLeft: 16, margin: 0 }}>
+              <li>AllocEntry for Accounting (pivot by cost center)</li>
+              <li>User Detail (per-user license breakdown)</li>
+              <li>Rate Sheet (reference)</li>
+              <li>Flagged - Unmatched (if any)</li>
+            </ul>
+          </div>
+          <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}` }}>
+            <h3 style={{ fontSize: 13, fontWeight: 700, color: COLORS.accent, marginBottom: 8 }}>Fixed % Export</h3>
+            <ul style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.8, paddingLeft: 16, margin: 0 }}>
+              <li>Monthly Allocation (with invoice breakdown and per-CC percentages)</li>
+              <li>Active Users (roster with cost center assignments)</li>
+              <li>Flagged - Unmatched (if any)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
