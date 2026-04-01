@@ -585,8 +585,8 @@ export default function AllocationTool() {
         {/* Header */}
         <div style={{ marginBottom: 8 }}>
           <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.accent, letterSpacing: 2, textTransform: "uppercase", marginBottom: 4 }}>MEG Finance</div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: COLORS.text }}>Software Cost Allocation Tool</h1>
-          <p style={{ fontSize: 13, color: COLORS.textMuted, marginTop: 4, marginBottom: 0 }}>Fixed Dollar &amp; Fixed % allocation builder</p>
+          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: COLORS.text }}>STEVE</h1>
+          <p style={{ fontSize: 13, color: COLORS.textMuted, marginTop: 4, marginBottom: 0 }}>Software Tool Expense Visibility Engine</p>
         </div>
 
         <StepBar step={step} />

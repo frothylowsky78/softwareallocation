@@ -1,4 +1,4 @@
-# MEG Software Cost Allocation Tool
+# STEVE: Software Tool Expense Visibility Engine
 
 A web-based tool for the MEG Finance team to allocate software costs across cost centers. Supports any software product (Adobe, Dropbox, Zoom, Slack, etc.) with two allocation methods used in Workday.
 
