@@ -276,6 +276,10 @@ export default function AllocationTool() {
   const [softwareName, setSoftwareName] = useState("");
   const [rateCardFile, setRateCardFile] = useState(null);
 
+  // Legal entity mapping (global, optional)
+  const [leFile, setLeFile] = useState(null);
+  const [leSheet, setLeSheet] = useState("");
+
   // Processing results
   const [processed, setProcessed] = useState(null);
   const [manualOverrides, setManualOverrides] = useState({});
@@ -362,6 +366,52 @@ export default function AllocationTool() {
     });
     return [...map.values()].sort((a, b) => a.ccId.localeCompare(b.ccId));
   }, [hrLookup]);
+
+  // Legal Entity lookup from Workday Cost Center Mapping file
+  const leLookup = useMemo(() => {
+    if (!leFile || !leSheet) return {};
+    const data = parseSheet(leFile.wb, leSheet);
+    let headerRow = -1;
+    let codeCol = -1;
+    let leCol = -1;
+    for (let i = 0; i < Math.min(10, data.length); i++) {
+      const row = (data[i] || []).map((x) => (x || "").toString().toLowerCase());
+      const ci = row.findIndex((x) => x === "code");
+      const li = row.findIndex((x) => x.includes("(1) legal entity"));
+      if (ci >= 0 && li >= 0) {
+        headerRow = i;
+        codeCol = ci;
+        leCol = li;
+        break;
+      }
+    }
+    if (headerRow < 0) return {};
+    const map = {};
+    for (let i = headerRow + 1; i < data.length; i++) {
+      const row = data[i] || [];
+      const code = (row[codeCol] || "").toString().trim();
+      const leRaw = (row[leCol] || "").toString().trim();
+      if (code && leRaw) {
+        const match = leRaw.match(/^(LE\d+)/);
+        if (match) {
+          map[code] = { leNum: match[1], leDesc: leRaw.substring(match[1].length).trim() };
+        }
+      }
+    }
+    return map;
+  }, [leFile, leSheet]);
+
+  const handleLeFileParsed = (parsed) => {
+    setLeFile(parsed);
+    if (parsed) {
+      const ccSheet = parsed.sheets.find((s) => s.toLowerCase().includes("cost center"));
+      if (ccSheet) setLeSheet(ccSheet);
+      else if (parsed.sheets.length === 1) setLeSheet(parsed.sheets[0]);
+      else setLeSheet("");
+    } else {
+      setLeSheet("");
+    }
+  };
 
   // Combined monthly amortized from all invoices
   const totalMonthlyAmort = useMemo(() => {
@@ -467,6 +517,7 @@ export default function AllocationTool() {
         .map(([ccId, members]) => ({
           ccId,
           ccDesc: members[0].ccDesc,
+          leNum: leLookup[ccId]?.leNum || "",
           userCount: members.length,
           paidLicenseCount: members.reduce((s, m) => s + m.licenses.length, 0),
           totalCost: members.reduce((s, m) => s + m.totalCost, 0),
@@ -482,6 +533,7 @@ export default function AllocationTool() {
         .map(([ccId, members]) => ({
           ccId,
           ccDesc: members[0].ccDesc,
+          leNum: leLookup[ccId]?.leNum || "",
           userCount: members.length,
           pct: members.length / total,
           monthlyCharge: (members.length / total) * monthlyAmort,
@@ -489,23 +541,35 @@ export default function AllocationTool() {
         .sort((a, b) => a.ccId.localeCompare(b.ccId));
       return { type: "percent", users: assigned, summary, totalUsers: total, monthlyAmort, stillFlagged, invoices, totalInvoiceAmount };
     }
-  }, [processed, manualOverrides, allocType, totalMonthlyAmort, totalInvoiceAmount, invoices, rates]);
+  }, [processed, manualOverrides, allocType, totalMonthlyAmort, totalInvoiceAmount, invoices, rates, leLookup]);
 
   // ── Excel Export ──────────────────────────────────────────────
   const exportExcel = () => {
     if (!finalAllocation) return;
     const wb = XLSX.utils.book_new();
 
+    const hasLE = Object.keys(leLookup).length > 0;
+
     if (finalAllocation.type === "dollar") {
       // Tab 1: Allocation Entry for Accounting (pivot)
       const sumData = [
-        ["", "", "", `${softwareName || "Software"} Cost Allocation per Month`],
-        ["CCID", "Cost Center Description", "# of Paid License Holders", "Total Monthly Cost"],
-        ...finalAllocation.summary.map((r) => [r.ccId, r.ccDesc, r.userCount, r.totalCost]),
-        ["Grand Total", "", finalAllocation.summary.reduce((s, r) => s + r.userCount, 0), finalAllocation.grandTotal],
+        hasLE
+          ? ["", "", "", "", `${softwareName || "Software"} Cost Allocation per Month`]
+          : ["", "", "", `${softwareName || "Software"} Cost Allocation per Month`],
+        hasLE
+          ? ["CCID", "Legal Entity", "Cost Center Description", "# of Paid License Holders", "Total Monthly Cost"]
+          : ["CCID", "Cost Center Description", "# of Paid License Holders", "Total Monthly Cost"],
+        ...finalAllocation.summary.map((r) =>
+          hasLE ? [r.ccId, r.leNum, r.ccDesc, r.userCount, r.totalCost] : [r.ccId, r.ccDesc, r.userCount, r.totalCost]
+        ),
+        hasLE
+          ? ["Grand Total", "", "", finalAllocation.summary.reduce((s, r) => s + r.userCount, 0), finalAllocation.grandTotal]
+          : ["Grand Total", "", finalAllocation.summary.reduce((s, r) => s + r.userCount, 0), finalAllocation.grandTotal],
       ];
       const ws1 = XLSX.utils.aoa_to_sheet(sumData);
-      ws1["!cols"] = [{ wch: 10 }, { wch: 50 }, { wch: 22 }, { wch: 20 }];
+      ws1["!cols"] = hasLE
+        ? [{ wch: 10 }, { wch: 10 }, { wch: 50 }, { wch: 22 }, { wch: 20 }]
+        : [{ wch: 10 }, { wch: 50 }, { wch: 22 }, { wch: 20 }];
       XLSX.utils.book_append_sheet(wb, ws1, "AllocEntry for Accounting");
 
       // Tab 2: User Detail
@@ -514,16 +578,22 @@ export default function AllocationTool() {
       for (let i = 0; i < maxLic; i++) {
         licHeaders.push(`License ${i + 1}`, `License ${i + 1} Cost`);
       }
-      const detailHeader = ["Email", "CC ID", "CC Desc", "Source", ...licHeaders, "Total Cost"];
+      const detailHeader = hasLE
+        ? ["Email", "CC ID", "Legal Entity", "CC Desc", "Source", ...licHeaders, "Total Cost"]
+        : ["Email", "CC ID", "CC Desc", "Source", ...licHeaders, "Total Cost"];
       const detailRows = finalAllocation.users.map((u) => {
         const licCols = [];
         for (let i = 0; i < maxLic; i++) {
           licCols.push(u.licenseCosts[i]?.name || "", u.licenseCosts[i]?.rate || 0);
         }
-        return [u.email, u.ccId, u.ccDesc, u.source, ...licCols, u.totalCost];
+        return hasLE
+          ? [u.email, u.ccId, leLookup[u.ccId]?.leNum || "", u.ccDesc, u.source, ...licCols, u.totalCost]
+          : [u.email, u.ccId, u.ccDesc, u.source, ...licCols, u.totalCost];
       });
       const ws2 = XLSX.utils.aoa_to_sheet([detailHeader, ...detailRows]);
-      ws2["!cols"] = [{ wch: 35 }, { wch: 10 }, { wch: 50 }, { wch: 8 }, ...licHeaders.map(() => ({ wch: 18 })), { wch: 12 }];
+      ws2["!cols"] = hasLE
+        ? [{ wch: 35 }, { wch: 10 }, { wch: 10 }, { wch: 50 }, { wch: 8 }, ...licHeaders.map(() => ({ wch: 18 })), { wch: 12 }]
+        : [{ wch: 35 }, { wch: 10 }, { wch: 50 }, { wch: 8 }, ...licHeaders.map(() => ({ wch: 18 })), { wch: 12 }];
       XLSX.utils.book_append_sheet(wb, ws2, "User Detail");
 
       // Tab 3: Rate Sheet
@@ -544,21 +614,37 @@ export default function AllocationTool() {
         ...invoiceRows,
         [`Combined Monthly Amortized: $${fmt(monthlyAmort)}`],
         [],
-        ["CC ID", "CC Description", "User Count", "% Allocation", "Monthly Charge"],
-        ...finalAllocation.summary.map((r) => [r.ccId, r.ccDesc, r.userCount, r.pct, r.monthlyCharge]),
-        ["Grand Total", "", finalAllocation.totalUsers, 1, monthlyAmort],
+        hasLE
+          ? ["CC ID", "Legal Entity", "CC Description", "User Count", "% Allocation", "Monthly Charge"]
+          : ["CC ID", "CC Description", "User Count", "% Allocation", "Monthly Charge"],
+        ...finalAllocation.summary.map((r) =>
+          hasLE ? [r.ccId, r.leNum, r.ccDesc, r.userCount, r.pct, r.monthlyCharge] : [r.ccId, r.ccDesc, r.userCount, r.pct, r.monthlyCharge]
+        ),
+        hasLE
+          ? ["Grand Total", "", "", finalAllocation.totalUsers, 1, monthlyAmort]
+          : ["Grand Total", "", finalAllocation.totalUsers, 1, monthlyAmort],
       ];
       const ws1 = XLSX.utils.aoa_to_sheet(sumData);
-      ws1["!cols"] = [{ wch: 12 }, { wch: 55 }, { wch: 12 }, { wch: 14 }, { wch: 16 }];
+      ws1["!cols"] = hasLE
+        ? [{ wch: 12 }, { wch: 10 }, { wch: 55 }, { wch: 12 }, { wch: 14 }, { wch: 16 }]
+        : [{ wch: 12 }, { wch: 55 }, { wch: 12 }, { wch: 14 }, { wch: 16 }];
       XLSX.utils.book_append_sheet(wb, ws1, "Monthly Allocation");
 
       // Tab 2: Active Users
       const userRows = [
-        ["Email", "Status", "CC ID", "CC Description", "Source"],
-        ...finalAllocation.users.map((u) => [u.email, u.status || "Active", u.ccId, u.ccDesc, u.source]),
+        hasLE
+          ? ["Email", "Status", "CC ID", "Legal Entity", "CC Description", "Source"]
+          : ["Email", "Status", "CC ID", "CC Description", "Source"],
+        ...finalAllocation.users.map((u) =>
+          hasLE
+            ? [u.email, u.status || "Active", u.ccId, leLookup[u.ccId]?.leNum || "", u.ccDesc, u.source]
+            : [u.email, u.status || "Active", u.ccId, u.ccDesc, u.source]
+        ),
       ];
       const ws2 = XLSX.utils.aoa_to_sheet(userRows);
-      ws2["!cols"] = [{ wch: 35 }, { wch: 10 }, { wch: 10 }, { wch: 55 }, { wch: 8 }];
+      ws2["!cols"] = hasLE
+        ? [{ wch: 35 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 55 }, { wch: 8 }]
+        : [{ wch: 35 }, { wch: 10 }, { wch: 10 }, { wch: 55 }, { wch: 8 }];
       XLSX.utils.book_append_sheet(wb, ws2, "Active Users");
     }
 
@@ -621,6 +707,34 @@ export default function AllocationTool() {
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Optional: Legal Entity Mapping */}
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                Legal Entity Mapping
+                <span style={{ fontSize: 11, fontWeight: 400, color: COLORS.textMuted }}>(optional — not required to run an allocation)</span>
+              </div>
+              <FileUpload
+                label="Drop Workday Cost Center Mapping File"
+                hint=".xlsx with cost center codes and legal entities"
+                parsed={leFile}
+                onParsed={handleLeFileParsed}
+              />
+              {leFile && (
+                <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontSize: 12, color: COLORS.textMuted }}>Sheet:</span>
+                  <select value={leSheet} onChange={(e) => setLeSheet(e.target.value)} style={{ ...baseInput, width: "auto" }}>
+                    <option value="">Select sheet</option>
+                    {leFile.sheets.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  {leSheet && Object.keys(leLookup).length > 0 && (
+                    <span style={{ fontSize: 11, color: COLORS.success }}>
+                      {Object.keys(leLookup).length} cost centers mapped to legal entities
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
 
             {hrSheet && swSheet && (
@@ -917,6 +1031,7 @@ export default function AllocationTool() {
               <DataTable
                 columns={[
                   { key: "ccId", label: "CC ID" },
+                  { key: "leNum", label: "Legal Entity" },
                   { key: "ccDesc", label: "Cost Center" },
                   { key: "userCount", label: "Users" },
                   { key: "paidLicenseCount", label: "Licenses" },
@@ -928,6 +1043,7 @@ export default function AllocationTool() {
               <DataTable
                 columns={[
                   { key: "ccId", label: "CC ID" },
+                  { key: "leNum", label: "Legal Entity" },
                   { key: "ccDesc", label: "Cost Center" },
                   { key: "userCount", label: "Users" },
                   { key: "pct", label: "% Allocation", render: (r) => fmtPct(r.pct) },
@@ -1019,6 +1135,21 @@ export default function AllocationTool() {
               <li>Flagged - Unmatched (if any)</li>
             </ul>
           </div>
+        </div>
+
+        <div style={{ background: COLORS.surface, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.border}`, marginTop: 24 }}>
+          <h3 style={{ fontSize: 13, fontWeight: 700, color: COLORS.accent, marginBottom: 8 }}>Uploading a New Legal Entity List</h3>
+          <p style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.6, marginBottom: 10 }}>
+            The Legal Entity mapping connects each cost center to its Workday legal entity number (LE###). When loaded, the LE number is included in all allocation outputs alongside the cost center code.
+          </p>
+          <ul style={{ fontSize: 12, color: COLORS.textMuted, lineHeight: 1.8, paddingLeft: 16, margin: 0 }}>
+            <li>Upload the latest <strong style={{ color: COLORS.text }}>Workday Cost Center Mapping</strong> file (.xlsx) in the "Legal Entity Mapping" area on the Upload step</li>
+            <li>The file should contain a sheet with a <strong style={{ color: COLORS.text }}>Code</strong> column (cost center codes) and a <strong style={{ color: COLORS.text }}>(1) Legal Entity</strong> column</li>
+            <li>The system auto-detects the "Cost Centers" sheet and parses the LE### number from each legal entity entry</li>
+            <li>This is a <strong style={{ color: COLORS.text }}>global update</strong> that applies to all allocations — upload a new file whenever the mapping is refreshed (e.g., quarterly)</li>
+            <li>The legal entity mapping is <strong style={{ color: COLORS.text }}>not required</strong> to run a cost allocation — if no file is uploaded, allocations will proceed without LE numbers</li>
+            <li>The mapping persists across allocations in the same session — you do not need to re-upload it for each new allocation</li>
+          </ul>
         </div>
       </div>
     </div>
