@@ -7,6 +7,21 @@ const normalizeEmail = (e) => (e || "").toString().trim().toLowerCase();
 const fmt = (n) => (n == null || isNaN(n) ? "—" : n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const fmtPct = (n) => (n == null || isNaN(n) ? "—" : (n * 100).toFixed(2) + "%");
 
+const levenshtein = (a, b) => {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
+    }
+    prev = curr;
+  }
+  return prev[b.length];
+};
+
 const guessColumn = (headers, patterns) => {
   const h = headers.map((x) => (x || "").toString().toLowerCase());
   for (const p of patterns) {
@@ -283,6 +298,7 @@ export default function AllocationTool() {
   // Processing results
   const [processed, setProcessed] = useState(null);
   const [manualOverrides, setManualOverrides] = useState({});
+  const [dismissedSuggestions, setDismissedSuggestions] = useState(new Set());
 
   // ── Derived data ──────────────────────────────────────────────
   const hrData = useMemo(() => {
@@ -366,6 +382,58 @@ export default function AllocationTool() {
     });
     return [...map.values()].sort((a, b) => a.ccId.localeCompare(b.ccId));
   }, [hrLookup]);
+
+  // Smart match suggestions for flagged users
+  const suggestions = useMemo(() => {
+    if (!processed || processed.flaggedUsers.length === 0) return [];
+    const hrEmails = Object.keys(hrLookup);
+    if (hrEmails.length === 0) return [];
+
+    const MIN_SIMILARITY = 30;
+
+    return processed.flaggedUsers.map((u) => {
+      const email = normalizeEmail(u.email);
+      const localPart = email.split("@")[0] || "";
+
+      let bestMatch = null;
+      let bestDist = Infinity;
+      let secondMatch = null;
+      let secondDist = Infinity;
+
+      for (const hrEmail of hrEmails) {
+        const hrLocal = hrEmail.split("@")[0] || "";
+        const dist = levenshtein(localPart, hrLocal);
+        if (dist < bestDist) {
+          secondDist = bestDist;
+          secondMatch = bestMatch;
+          bestDist = dist;
+          bestMatch = hrEmail;
+        } else if (dist < secondDist) {
+          secondDist = dist;
+          secondMatch = hrEmail;
+        }
+      }
+
+      const maxLen = Math.max(localPart.length, bestMatch ? (bestMatch.split("@")[0] || "").length : 1);
+      const similarity = bestMatch ? Math.round((1 - bestDist / Math.max(maxLen, 1)) * 100) : 0;
+
+      const secondMaxLen = Math.max(localPart.length, secondMatch ? (secondMatch.split("@")[0] || "").length : 1);
+      const secondSimilarity = secondMatch ? Math.round((1 - secondDist / Math.max(secondMaxLen, 1)) * 100) : 0;
+
+      return {
+        email: u.email,
+        itCcId: u.itCcId || "",
+        bestEmail: bestMatch,
+        bestCcId: bestMatch ? hrLookup[bestMatch].ccId : "",
+        bestCcDesc: bestMatch ? hrLookup[bestMatch].ccDesc : "",
+        similarity,
+        secondEmail: secondSimilarity >= MIN_SIMILARITY ? secondMatch : null,
+        secondCcId: secondMatch && secondSimilarity >= MIN_SIMILARITY ? hrLookup[secondMatch].ccId : "",
+        secondCcDesc: secondMatch && secondSimilarity >= MIN_SIMILARITY ? hrLookup[secondMatch].ccDesc : "",
+        secondSimilarity,
+      };
+    }).filter((s) => s.similarity >= MIN_SIMILARITY);
+  }, [processed, hrLookup]);
 
   // Legal Entity lookup from Workday Cost Center Mapping file
   const leLookup = useMemo(() => {
@@ -496,6 +564,7 @@ export default function AllocationTool() {
 
     setProcessed({ users: activeUsers, flaggedUsers, paidUsers });
     setManualOverrides({});
+    setDismissedSuggestions(new Set());
     setStep(2);
   };
 
@@ -962,18 +1031,136 @@ export default function AllocationTool() {
               ))}
             </div>
 
-            {/* Flagged users for manual assignment */}
+            {/* Smart Match Suggestions */}
+            {processed.flaggedUsers.length > 0 && suggestions.length > 0 && (() => {
+              const pending = suggestions.filter((s) => !manualOverrides[s.email]?.ccId && !dismissedSuggestions.has(s.email));
+              const accepted = suggestions.filter((s) => manualOverrides[s.email]?.ccId);
+              const skipped = suggestions.filter((s) => dismissedSuggestions.has(s.email));
+              if (pending.length === 0 && accepted.length === 0 && skipped.length === 0) return null;
+              return (
+                <div style={{ background: "rgba(79,124,255,0.06)", borderRadius: 10, padding: 20, border: `1px solid ${COLORS.accent}33`, marginBottom: 24 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.accent }}>
+                      Smart Match Suggestions
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      {accepted.length > 0 && (
+                        <span style={{ fontSize: 11, color: COLORS.success }}>{accepted.length} accepted</span>
+                      )}
+                      {skipped.length > 0 && (
+                        <span style={{ fontSize: 11, color: COLORS.textMuted }}>{skipped.length} skipped</span>
+                      )}
+                      {pending.length > 0 && (
+                        <button
+                          onClick={() => {
+                            const overrides = {};
+                            pending.forEach((s) => {
+                              overrides[s.email] = { ccId: s.bestCcId, ccDesc: s.bestCcDesc };
+                            });
+                            setManualOverrides((o) => ({ ...o, ...overrides }));
+                          }}
+                          style={{ ...btn("primary"), padding: "5px 14px", fontSize: 11 }}
+                        >
+                          Accept All ({pending.length})
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <p style={{ fontSize: 12, color: COLORS.textMuted, margin: "4px 0 12px" }}>
+                    Found potential HR matches for {suggestions.length} of {processed.flaggedUsers.length} unmatched users based on email similarity.
+                  </p>
+
+                  {pending.length > 0 && (
+                    <div style={{ maxHeight: 420, overflowY: "auto" }}>
+                      {pending.map((s) => {
+                        const simColor = s.similarity >= 70 ? COLORS.success : s.similarity >= 50 ? COLORS.warn : COLORS.textMuted;
+                        return (
+                          <div key={s.email} style={{ background: COLORS.surface, borderRadius: 8, padding: 12, marginBottom: 8, border: `1px solid ${COLORS.border}` }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                              <span style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: COLORS.text, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {s.email}
+                              </span>
+                              {s.itCcId && <span style={{ fontSize: 10, color: COLORS.textMuted, flexShrink: 0 }}>IT: {s.itCcId}</span>}
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                                  <span style={{ fontSize: 11, color: COLORS.textMuted }}>Best match:</span>
+                                  <span style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: COLORS.text }}>{s.bestEmail}</span>
+                                  <span style={{
+                                    fontSize: 10, fontWeight: 700, color: simColor,
+                                    background: `${simColor}18`, padding: "2px 6px", borderRadius: 10,
+                                  }}>
+                                    {s.similarity}%
+                                  </span>
+                                </div>
+                                <div style={{ fontSize: 11, color: COLORS.textMuted }}>
+                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, marginRight: 6 }}>{s.bestCcId}</span>
+                                  {s.bestCcDesc}
+                                </div>
+                                {s.secondEmail && (
+                                  <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                                    <span style={{ fontSize: 10, color: COLORS.textMuted }}>Alt:</span>
+                                    <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: COLORS.textMuted }}>{s.secondEmail}</span>
+                                    <span style={{ fontSize: 10, color: COLORS.textMuted }}>({s.secondSimilarity}%)</span>
+                                    <button
+                                      onClick={() => setManualOverrides((o) => ({ ...o, [s.email]: { ccId: s.secondCcId, ccDesc: s.secondCcDesc } }))}
+                                      style={{ background: "none", border: `1px solid ${COLORS.border}`, borderRadius: 4, color: COLORS.textMuted, fontSize: 10, padding: "1px 6px", cursor: "pointer" }}
+                                    >
+                                      Use this
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                                <button
+                                  onClick={() => setManualOverrides((o) => ({ ...o, [s.email]: { ccId: s.bestCcId, ccDesc: s.bestCcDesc } }))}
+                                  style={{ ...btn("primary"), padding: "6px 14px", fontSize: 11 }}
+                                >
+                                  Accept
+                                </button>
+                                <button
+                                  onClick={() => setDismissedSuggestions((prev) => new Set([...prev, s.email]))}
+                                  style={{ ...btn("ghost"), padding: "6px 14px", fontSize: 11 }}
+                                >
+                                  Skip
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {pending.length === 0 && (
+                    <div style={{ fontSize: 12, color: COLORS.success, textAlign: "center", padding: 12 }}>
+                      All suggestions reviewed — {accepted.length} accepted, {skipped.length} skipped
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Remaining manual assignment */}
             {processed.flaggedUsers.length > 0 && (
               <div style={{ background: COLORS.warnBg, borderRadius: 10, padding: 20, border: `1px solid ${COLORS.warn}33`, marginBottom: 24 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.warn, marginBottom: 4 }}>
-                  ⚠ {processed.flaggedUsers.filter((u) => !manualOverrides[u.email]?.ccId).length} users need cost center assignment
+                  {processed.flaggedUsers.filter((u) => !manualOverrides[u.email]?.ccId).length > 0
+                    ? `⚠ ${processed.flaggedUsers.filter((u) => !manualOverrides[u.email]?.ccId).length} users still need cost center assignment`
+                    : "All unmatched users have been assigned"}
                 </div>
                 <p style={{ fontSize: 12, color: COLORS.textMuted, margin: "4px 0 12px" }}>
-                  These emails weren't found in the HR file. Assign cost centers below or leave blank to exclude from allocation.
+                  Assign cost centers manually or leave blank to exclude from allocation.
                 </p>
                 <div style={{ maxHeight: 400, overflowY: "auto" }}>
                   {processed.flaggedUsers.map((u) => (
-                    <div key={u.email} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, background: COLORS.surface, padding: "8px 12px", borderRadius: 6 }}>
+                    <div key={u.email} style={{
+                      display: "flex", alignItems: "center", gap: 10, marginBottom: 6, borderRadius: 6,
+                      background: manualOverrides[u.email]?.ccId ? COLORS.successBg : COLORS.surface,
+                      padding: "8px 12px",
+                      border: manualOverrides[u.email]?.ccId ? `1px solid ${COLORS.success}33` : "none",
+                    }}>
                       <span style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</span>
                       {u.itCcId && <span style={{ fontSize: 10, color: COLORS.textMuted, flexShrink: 0 }}>IT: {u.itCcId}</span>}
                       <div style={{ width: 280, flexShrink: 0 }}>
